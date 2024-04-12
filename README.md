@@ -1,1 +1,1 @@
-# idependent-study
+# independent-study
