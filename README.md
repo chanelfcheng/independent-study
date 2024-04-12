@@ -1,1 +1,1 @@
-# ssl-idependent-study
+# idependent-study
