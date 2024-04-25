@@ -1,0 +1,4 @@
+**/data/
+**.pth
+# Ignore all pycache directories
+**/__pycache__/
