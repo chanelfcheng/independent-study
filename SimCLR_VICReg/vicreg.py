@@ -5,6 +5,7 @@ import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils import *
 
@@ -67,7 +68,7 @@ if __name__ == "__main__":
         # optimizer = LARSOptimizer(model.parameters(), lr=0.3*batch_size/256,
         # weight_decay=1e-6)
         optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-6)
-        scheduler = CosineLearningRateScheduler(optimizer, base_learning_rate=0.001, num_examples=len(dataset), train_batch_size=batch_size, warmup_epochs=10, total_epochs=100)
+        scheduler = CosineAnnealingLR(optimizer, T_max=len(dataloader), eta_min=0, last_epoch=-1)
 
         # Train the model
         epochs = 10
