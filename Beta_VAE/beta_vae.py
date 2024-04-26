@@ -23,7 +23,7 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     # Train the model if no saved model is found
-    if not os.path.exists('./beta_vae.pth'):
+    if not os.path.exists(f'./beta_vae_{args.beta:.1f}.pth'):
         print("Training the model...")
         model = BetaVAE(latent_dim=20, beta=args.beta)
         model.to(device)
@@ -31,11 +31,11 @@ if __name__ == "__main__":
         epochs = args.epochs
         for epoch in range(1, epochs + 1):
             model = train(epoch, model, device, dataloader, optimizer)
-            torch.save(model.state_dict(), './beta_vae.pth')
+            torch.save(model.state_dict(), f'./beta_vae_{args.beta:.1f}.pth')
     else:
         print("Loading the model...")
         model = BetaVAE(latent_dim=20, beta=args.beta)
-        model.load_state_dict(torch.load('./beta_vae.pth'))
+        model.load_state_dict(torch.load(f'./beta_vae_{args.beta:.1f}.pth'))
         model.to(device)
 
     # Evaluate the model

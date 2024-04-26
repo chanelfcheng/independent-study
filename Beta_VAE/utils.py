@@ -60,7 +60,7 @@ def train(epoch, model, device, data_loader, optimizer):
     return model
 
 
-def evaluate(model, device, data_loader):
+def evaluate(model, device, data_loader):    
     model.eval()
     latents = []
     factors = []
@@ -78,21 +78,24 @@ def evaluate(model, device, data_loader):
     R = np.zeros((latents.shape[1], factors.shape[1]))  # Latent dimensions x Generative factors
 
     # Train a regressor for each latent dimension and each factor
-    for i in range(latents.shape[1]):  # For each latent dimension
-        for j in range(factors.shape[1]):  # For each generative factor
+    for i in range(latents.shape[1]):
+        for j in range(factors.shape[1]):
             regressor = Lasso(alpha=0.1)
             regressor.fit(latents[:, i:i+1], factors[:, j])
             R[i, j] = np.abs(regressor.coef_)
 
-    # Normalize R across columns (latent dimensions) for C
+    # Avoid division by zero by adding a small constant if necessary
+    R += 1e-10
+
+    # Normalize R across columns for completeness and handle zero columns
     R_norm_columns = normalize(R, norm='l1', axis=0)
     C = 1 - entropy(R_norm_columns, base=2, axis=0)
-    C = np.mean(C)
+    C = np.nanmean(C)  # Using np.nanmean to safely ignore NaNs
 
-    # Normalize R across rows (generative factors) for D
+    # Normalize R across rows for disentanglement and handle zero rows
     R_norm_rows = normalize(R, norm='l1', axis=1)
     D = 1 - entropy(R_norm_rows, base=2, axis=1)
-    D = np.mean(D)
+    D = np.nanmean(D)  # Using np.nanmean to safely ignore NaNs
 
     mutual_infos = []
     for i in range(latents.shape[1]):  # For each latent dimension
@@ -107,7 +110,7 @@ def evaluate(model, device, data_loader):
             # Calculate mutual information using the contingency table
             mi = mutual_info_score(None, None, contingency=contingency)
             mutual_infos.append(mi)
-            
+
     # Compute average mutual information
     I = np.mean(mutual_infos)
 
