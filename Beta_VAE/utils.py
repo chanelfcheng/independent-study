@@ -74,44 +74,31 @@ def evaluate(model, device, data_loader):
 
     latents = np.concatenate(latents, axis=0)
     factors = np.concatenate(factors, axis=0)
-
-    R = np.zeros((latents.shape[1], factors.shape[1]))  # Latent dimensions x Generative factors
+    z_score_latents = (latents - latents.mean(axis=0)) / latents.std(axis=0)
+    z_score_factors = (factors - factors.mean(axis=0)) / factors.std(axis=0)
 
     # Train a regressor for each latent dimension and each factor
-    for i in range(latents.shape[1]):
-        for j in range(factors.shape[1]):
-            regressor = Lasso(alpha=0.1)
-            regressor.fit(latents[:, i:i+1], factors[:, j])
-            R[i, j] = np.abs(regressor.coef_)
+    regression_model = Lasso(alpha=0.1)
+    regression_model.fit(z_score_factors, z_score_latents)
+    R = np.abs(regression_model.coef_)
 
     # Avoid division by zero by adding a small constant if necessary
     R += 1e-10
 
     # Normalize R across columns for completeness and handle zero columns
     R_norm_columns = normalize(R, norm='l1', axis=0)
-    C = 1 - entropy(R_norm_columns, base=2, axis=0)
+    C = 1 - entropy(R_norm_columns, base=R.shape[0], axis=0)
     C = np.nanmean(C)  # Using np.nanmean to safely ignore NaNs
 
     # Normalize R across rows for disentanglement and handle zero rows
     R_norm_rows = normalize(R, norm='l1', axis=1)
-    D = 1 - entropy(R_norm_rows, base=2, axis=1)
+    D = 1 - entropy(R_norm_rows, base=R.shape[1], axis=1)
     D = np.nanmean(D)  # Using np.nanmean to safely ignore NaNs
 
-    mutual_infos = []
-    for i in range(latents.shape[1]):  # For each latent dimension
-        for j in range(factors.shape[1]):  # For each generative factor
-            # Compute histogram bins edges for latents and factors
-            bins_latents = np.histogram_bin_edges(latents[:, i], bins='auto')
-            bins_factors = np.histogram_bin_edges(factors[:, j], bins='auto')
-            
-            # Compute the contingency table using the computed bins
-            contingency, _, _ = np.histogram2d(latents[:, i], factors[:, j], bins=[bins_latents, bins_factors])
-            
-            # Calculate mutual information using the contingency table
-            mi = mutual_info_score(None, None, contingency=contingency)
-            mutual_infos.append(mi)
+    MSE = np.mean((z_score_latents - regression_model.predict(z_score_factors)) ** 2, axis=0)
+    RMSE = np.sqrt(MSE)
 
     # Compute average mutual information
-    I = np.mean(mutual_infos)
+    I = np.mean(RMSE)
 
     return D, C, I
