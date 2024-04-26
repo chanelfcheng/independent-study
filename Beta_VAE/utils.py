@@ -94,11 +94,21 @@ def evaluate(model, device, data_loader):
     D = 1 - entropy(R_norm_rows, base=2, axis=1)
     D = np.mean(D)
 
-    # Calculate Mutual Information for Informativeness (I)
     mutual_infos = []
-    for i in range(latents.shape[1]):
-        mi = mutual_info_score(None, None, contingency=np.histogram2d(latents[:, i], factors.ravel())[0])
-        mutual_infos.append(mi)
+    for i in range(latents.shape[1]):  # For each latent dimension
+        for j in range(factors.shape[1]):  # For each generative factor
+            # Compute histogram bins edges for latents and factors
+            bins_latents = np.histogram_bin_edges(latents[:, i], bins='auto')
+            bins_factors = np.histogram_bin_edges(factors[:, j], bins='auto')
+            
+            # Compute the contingency table using the computed bins
+            contingency, _, _ = np.histogram2d(latents[:, i], factors[:, j], bins=[bins_latents, bins_factors])
+            
+            # Calculate mutual information using the contingency table
+            mi = mutual_info_score(None, None, contingency=contingency)
+            mutual_infos.append(mi)
+            
+    # Compute average mutual information
     I = np.mean(mutual_infos)
 
     return D, C, I

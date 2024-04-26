@@ -1,136 +1,86 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-from simclr import *
 
 import torch.nn as nn
-import torch.optim as optim
-from torchvision.models import resnet50
+import torch.nn.functional as F
+from torchvision import transforms
 
-import re
-import math
-
-
-class LARSOptimizer(optim.Optimizer):
-    def __init__(self, params, lr, momentum=0.9, use_nesterov=False, weight_decay=0.0, exclude_from_weight_decay=None, exclude_from_layer_adaptation=None, classic_momentum=True, eeta=0.001):
-        if lr < 0.0:
-            raise ValueError("Invalid learning rate: {}".format(lr))
-        if momentum < 0.0:
-            raise ValueError("Invalid momentum value: {}".format(momentum))
-        
-        defaults = dict(lr=lr, momentum=momentum, use_nesterov=use_nesterov, weight_decay=weight_decay, classic_momentum=classic_momentum, eeta=eeta)
-        super(LARSOptimizer, self).__init__(params, defaults)
-        
-        self.exclude_from_weight_decay = exclude_from_weight_decay
-        if exclude_from_layer_adaptation is not None:
-            self.exclude_from_layer_adaptation = exclude_from_layer_adaptation
-        else:
-            self.exclude_from_layer_adaptation = exclude_from_weight_decay
+class NTXentLoss(nn.Module):
+    def __init__(self, temperature=0.5):
+        super(NTXentLoss, self).__init__()
+        self.temperature = temperature
     
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            loss = closure()
-        
-        for group in self.param_groups:
-            weight_decay = group['weight_decay']
-            momentum = group['momentum']
-            learning_rate = group['lr']
-            eeta = group['eeta']
-            use_nesterov = group['use_nesterov']
-            
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad.data
-                if self._use_weight_decay(p.name):
-                    grad = grad.add(p.data, alpha=weight_decay)
-                
-                param_state = self.state[p]
-                
-                if 'momentum_buffer' not in param_state:
-                    buf = param_state['momentum_buffer'] = torch.clone(grad).detach()
-                else:
-                    buf = param_state['momentum_buffer']
-                    buf.mul_(momentum).add_(grad, alpha=1)
-                
-                if self._do_layer_adaptation(p.name):
-                    w_norm = torch.norm(p.data, p=2)
-                    g_norm = torch.norm(buf, p=2)
-                    trust_ratio = eeta * w_norm / g_norm
-                    scaled_lr = learning_rate * trust_ratio
-                else:
-                    scaled_lr = learning_rate
-                
-                if use_nesterov:
-                    p.add_(buf, alpha=-momentum * scaled_lr).add_(grad, alpha=-scaled_lr)
-                else:
-                    p.add_(buf, alpha=-scaled_lr)
-                
+    def forward(self, z_i, z_j):
+        def cosine_similarity(z_i, z_j):
+            # L2 normalize the vectors along the last dimension
+            z_i_norm = z_i / (z_i.norm(dim=1, keepdim=True) + 1e-6)
+            z_j_norm = z_j / (z_j.norm(dim=1, keepdim=True) + 1e-6)
+
+            # Compute the cosine similarity
+            cosine_sim = torch.mm(z_i_norm, z_j_norm.T)
+            return cosine_sim
+
+        z = torch.cat([z_i, z_j], dim=0)
+        sim_matrix = cosine_similarity(z, z)
+
+        # Construct the positive similarity vector
+        sim_ij = torch.diag(sim_matrix, z_i.size(0))
+        sim_ji = torch.diag(sim_matrix, -z_i.size(0))
+        log_numerator = torch.cat((sim_ij, sim_ji), dim=0) / self.temperature
+
+        # Construct the negative similarity vector
+        tensor = torch.eye(z_i.size(0), device=z.device, dtype=bool)
+        mask = torch.vstack([
+            torch.hstack([tensor, tensor]), torch.hstack([tensor, tensor])
+        ])
+        sim_matrix = sim_matrix.masked_fill(mask, 0)
+
+        log_denominator = torch.logsumexp(sim_matrix / self.temperature, dim=1)
+        quantity_to_maximize = log_numerator - log_denominator
+        loss = -quantity_to_maximize
+        return loss.mean()
+
+
+class VICRegLoss(nn.Module):
+    def __init__(self, lamb=25, mu=25, nu=1):
+        super(VICRegLoss, self).__init__()
+        self.lamb = lamb
+        self.mu = mu
+        self.nu = nu
+    
+    def forward(self, z_i, z_j):
+        # Invariance loss
+        sim_loss = F.mse_loss(z_i, z_j)
+
+        # Variance loss
+        std_z_i = torch.sqrt(z_i.var(dim=0) + 1e-04)
+        std_z_j = torch.sqrt(z_j.var(dim=0) + 1e-04)
+        std_loss = torch.mean(torch.relu(1 - std_z_i)) + torch.mean(torch.relu(1 - std_z_j))
+
+        # Covariance loss
+        N, D = z_i.size()
+        z_i = z_i - z_i.mean(dim=0)
+        z_j = z_j - z_j.mean(dim=0)
+        cov_z_i = (z_i.T @ z_i) / (N - 1)
+        cov_z_j = (z_j.T @ z_j) / (N - 1)
+        # cov_loss -= (cov_z_i.diagonal() ** 2).sum() / D + (cov_z_j.diagonal()
+        # ** 2).sum() / D
+        cov_loss = ((torch.triu(cov_z_i, 1) ** 2).sum() / D + (torch.triu(cov_z_j, 1) ** 2).sum() / D) * 4
+
+        # Combine losses
+        # Look at each of the 3 terms separately -- log them
+        loss = self.lamb * sim_loss + self.mu * std_loss + self.nu * cov_loss
         return loss
-    
-    def _use_weight_decay(self, param_name):
-        if not self.defaults['weight_decay']:
-            return False
-        if self.exclude_from_weight_decay is None:
-            return True
-        return all(re.search(r, param_name) is None for r in self.exclude_from_weight_decay)
-    
-    def _do_layer_adaptation(self, param_name):
-        if self.exclude_from_layer_adaptation is None:
-            return True
-        return all(re.search(r, param_name) is None for r in self.exclude_from_layer_adaptation)
-
-
-class CosineLearningRateScheduler:
-    def __init__(self, optimizer, base_learning_rate, num_examples, train_batch_size, warmup_epochs, total_epochs, learning_rate_scaling='linear'):
-        self.optimizer = optimizer
-        self.base_learning_rate = base_learning_rate
-        self.num_examples = num_examples
-        self.train_batch_size = train_batch_size
-        self.warmup_steps = int(round(warmup_epochs * num_examples / train_batch_size))
-        self.total_steps = total_epochs * num_examples / train_batch_size
-        self.global_step = 0
-        self.learning_rate_scaling = learning_rate_scaling
-
-        if learning_rate_scaling == 'linear':
-            self.scaled_lr = base_learning_rate * train_batch_size / 256.
-        elif learning_rate_scaling == 'sqrt':
-            self.scaled_lr = base_learning_rate * math.sqrt(train_batch_size)
-        else:
-            raise ValueError(f'Unknown learning rate scaling {learning_rate_scaling}')
-
-    def step(self):
-        self.global_step += 1
-        if self.warmup_steps:
-            warmup_lr = self.global_step / self.warmup_steps * self.scaled_lr
-        else:
-            warmup_lr = self.scaled_lr
-
-        if self.global_step < self.warmup_steps:
-            learning_rate = warmup_lr
-        else:
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * (self.global_step - self.warmup_steps) / (self.total_steps - self.warmup_steps)))
-            decayed_lr = self.scaled_lr * cosine_decay
-            learning_rate = decayed_lr
-
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = learning_rate
-
-    def get_lr(self):
-        # Optionally implement this method if you need to retrieve the current learning rate
-        if self.global_step < self.warmup_steps:
-            return self.global_step / self.warmup_steps * self.scaled_lr
-        else:
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * (self.global_step - self.warmup_steps) / (self.total_steps - self.warmup_steps)))
-            return self.scaled_lr * cosine_decay
 
 
 class AugmentedPairDataset(Dataset):
     def __init__(self, images, transform=None, subset_size=None):
         self.images = images
-        self.transform = transform
+        self.transform1 = transforms.Compose([
+            transforms.ToTensor()
+        ])
+        self.transform2 = transform
         if subset_size is not None:
             # Ensure subset_size does not exceed the total number of images
             subset_size = min(subset_size, len(images))
@@ -143,55 +93,11 @@ class AugmentedPairDataset(Dataset):
     def __getitem__(self, idx):
         img = self.images[idx]
 
-        if self.transform:
-            img1 = self.transform(img)
-            img2 = self.transform(img)
+        if self.transform2:
+            img1 = self.transform1(img)
+            img2 = self.transform2(img)
         else:
-            img1, img2 = img, img
+            img1 = self.transform1(img)
+            img2 = self.transform1(img)
         
         return img1, img2
-
-
-class BaseModel(nn.Module):
-    def __init__(self):
-        super(BaseModel, self).__init__()
-        self.encoder = resnet50(pretrained=False)
-        self.encoder.fc = nn.Identity()  # Remove the final layer
-        self.projector = Projector()
-    
-    def forward(self, x_i, x_j):
-        h_i = self.encoder(x_i)
-        h_j = self.encoder(x_j)
-        z_i = self.projector(h_i)
-        z_j = self.projector(h_j)
-        return z_i, z_j
-
-
-class Projector(nn.Module):
-    def __init__(self, input_dim=2048, hidden_dim=128):
-        super(Projector, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.norm = nn.BatchNorm1d(hidden_dim)
-    
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.norm(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        x = self.norm(x)
-        x = self.relu(x)
-        x = self.fc3(x)
-        return x
-
-
-class LinearClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes):
-        super(LinearClassifier, self).__init__()
-        self.fc = nn.Linear(input_dim, num_classes)
-    
-    def forward(self, x):
-        x = self.fc(x)
-        return x

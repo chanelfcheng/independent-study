@@ -9,37 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils import *
 
-class VICRegLoss(nn.Module):
-    def __init__(self, lamb=25, mu=25, nu=1):
-        super(VICRegLoss, self).__init__()
-        self.lamb = lamb
-        self.mu = mu
-        self.nu = nu
-    
-    def forward(self, z_i, z_j):
-        # Invariance loss
-        sim_loss = F.mse_loss(z_i, z_j)
 
-        # Variance loss
-        std_z_i = torch.sqrt(z_i.var(dim=0) + 1e-04)
-        std_z_j = torch.sqrt(z_j.var(dim=0) + 1e-04)
-        std_loss = torch.mean(torch.relu(1 - std_z_i)) + torch.mean(torch.relu(1 - std_z_j))
-
-        # Covariance loss
-        N, D = z_i.size()
-        z_i = z_i - z_i.mean(dim=0)
-        z_j = z_j - z_j.mean(dim=0)
-        cov_z_i = (z_i.T @ z_i) / (N - 1)
-        cov_z_j = (z_j.T @ z_j) / (N - 1)
-        # cov_loss -= (cov_z_i.diagonal() ** 2).sum() / D + (cov_z_j.diagonal()
-        # ** 2).sum() / D
-        cov_loss = ((torch.triu(cov_z_i, 1) ** 2).sum() / D + (torch.triu(cov_z_j, 1) ** 2).sum() / D) * 4
-
-        # Combine losses
-        # Look at each of the 3 terms separately -- log them
-        loss = self.lamb * sim_loss + self.mu * std_loss + self.nu * cov_loss
-        print(loss)
-        return loss
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import torch
 from torch.utils.data import DataLoader
@@ -18,19 +19,27 @@ if __name__ == "__main__":
 
     # Data loading and training setup
     dataset = TeapotsDatasetNPZ(args.npz_path)
-    model = BetaVAE(latent_dim=20, beta=args.beta)
     device = torch.device(args.device)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
-    optimizer = Adam(model.parameters(), lr=1e-4, weight_decay=1e-6)
-    epochs = args.epochs
 
-    # Traing the model
-    model.to(device)
-    for epoch in range(1, epochs + 1):
-        model = train(epoch, model, device, dataloader, optimizer)
-        torch.save(model.state_dict(), './beta_vae.pth')
+    # Train the model if no saved model is found
+    if not os.path.exists('./beta_vae.pth'):
+        print("Training the model...")
+        model = BetaVAE(latent_dim=20, beta=args.beta)
+        model.to(device)
+        optimizer = Adam(model.parameters(), lr=1e-4, weight_decay=1e-6)
+        epochs = args.epochs
+        for epoch in range(1, epochs + 1):
+            model = train(epoch, model, device, dataloader, optimizer)
+            torch.save(model.state_dict(), './beta_vae.pth')
+    else:
+        print("Loading the model...")
+        model = BetaVAE(latent_dim=20, beta=args.beta)
+        model.load_state_dict(torch.load('./beta_vae.pth'))
+        model.to(device)
 
     # Evaluate the model
+    print("Evaluating the model...")
     model.eval()
     D, C, I = evaluate(model, device, dataloader)
 
